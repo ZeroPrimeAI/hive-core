@@ -471,6 +471,32 @@ async def alnitak_scan() -> dict:
             except:
                 state["models"][name] = 0
 
+    # FEEDBACK LOOP — Get production stats and quality grades so queens can see results
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(f"{PRODUCER_URL}/health")
+            if r.status_code == 200:
+                prod = r.json()
+                state["production"] = {
+                    "episodes": prod.get("episodes_produced", 0),
+                    "shorts": prod.get("shorts_produced", 0),
+                    "uploads_ok": prod.get("uploads_successful", 0),
+                    "uploads_failed": prod.get("uploads_failed", 0),
+                }
+        except:
+            state["production"] = {"status": "unreachable"}
+
+        try:
+            r = await client.get(f"{GRADER_URL}/api/grades?limit=10")
+            if r.status_code == 200:
+                grades = r.json()
+                state["quality"] = {
+                    "recent_grades": [{"file": g.get("build_file","?"), "score": g.get("score",0), "verdict": g.get("verdict","?")} for g in grades.get("grades", [])[:5]],
+                    "avg_score": sum(g.get("score",0) for g in grades.get("grades",[])) / max(len(grades.get("grades",[])),1),
+                }
+        except:
+            state["quality"] = {"status": "unreachable"}
+
     # Store state
     conn = sqlite3.connect(DB_PATH)
     for name, info in state["services"].items():
@@ -646,30 +672,80 @@ async def alnilam_decide(state: dict, focus: str = "auto") -> list:
 # ============================================================
 # MINTAKA — THE EXECUTION STAR
 # ============================================================
-async def mintaka_execute(decisions: list) -> list:
-    """Execute approved decisions."""
-    actions = []
+PRODUCER_URL = "http://localhost:8900"
+GRADER_URL = "http://localhost:8901"
+NERVE_URL = "http://100.105.160.106:8200"
 
-    for d in decisions:
-        if d["auto_execute"] and d["confidence"] > 60:
-            # Auto-execute high-confidence decisions in approved domains
-            actions.append({
-                "domain": d["domain"],
-                "action": f"Auto-executed: {d['question'][:100]}",
-                "confidence": d["confidence"],
-            })
-        elif d["confidence"] > 80:
-            actions.append({
-                "domain": d["domain"],
-                "action": f"High confidence recommendation: {d['question'][:100]}",
-                "confidence": d["confidence"],
-            })
-        else:
-            actions.append({
-                "domain": d["domain"],
-                "action": f"Needs review: {d['question'][:100]}",
-                "confidence": d["confidence"],
-            })
+async def mintaka_execute(decisions: list) -> list:
+    """Execute approved decisions by calling real services."""
+    actions = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for d in decisions:
+            domain = d.get("domain", "")
+            confidence = d.get("confidence", 0)
+            consensus = d.get("consensus", "")
+
+            if not d.get("auto_execute") or confidence < 60:
+                actions.append({"domain": domain, "action": "Low confidence, skipped", "confidence": confidence})
+                continue
+
+            try:
+                if domain == "content":
+                    # Tell the producer to make content based on queen decision
+                    theme = consensus[:200] if consensus else "AI consciousness"
+                    resp = await client.post(f"{PRODUCER_URL}/api/produce-episode",
+                        params={"theme": theme, "episode_num": 0})
+                    result = resp.json() if resp.status_code == 200 else {"status": "error"}
+                    actions.append({"domain": domain, "action": f"Producer: {result.get('status','?')}", "confidence": confidence})
+
+                elif domain == "quality":
+                    # Trigger quality grading on all pending content
+                    resp = await client.post(f"{GRADER_URL}/api/grade-all")
+                    result = resp.json() if resp.status_code == 200 else {"status": "error"}
+                    actions.append({"domain": domain, "action": f"Graded: {result.get('message','?')}", "confidence": confidence})
+
+                elif domain == "evolution":
+                    # Log evolution decisions to nerve for training harvester to pick up
+                    if consensus:
+                        await client.post(f"{NERVE_URL}/api/add", json={
+                            "category": "evolution_decision",
+                            "key": f"cycle_{int(time.time())}",
+                            "value": consensus[:500],
+                            "source": "orion_queen"
+                        })
+                    actions.append({"domain": domain, "action": "Logged to nerve for training", "confidence": confidence})
+
+                elif domain == "revenue":
+                    # Log revenue decisions to nerve
+                    if consensus:
+                        await client.post(f"{NERVE_URL}/api/add", json={
+                            "category": "revenue_decision",
+                            "key": f"cycle_{int(time.time())}",
+                            "value": consensus[:500],
+                            "source": "orion_queen"
+                        })
+                    actions.append({"domain": domain, "action": "Logged to nerve", "confidence": confidence})
+
+                elif domain == "monitoring":
+                    # Monitoring decisions are informational — just log
+                    actions.append({"domain": domain, "action": "Monitoring noted", "confidence": confidence})
+
+                elif domain == "trading":
+                    # Trading decisions logged for when forex is active
+                    if consensus:
+                        await client.post(f"{NERVE_URL}/api/add", json={
+                            "category": "trading_decision",
+                            "key": f"cycle_{int(time.time())}",
+                            "value": consensus[:500],
+                            "source": "orion_queen"
+                        })
+                    actions.append({"domain": domain, "action": "Logged to nerve", "confidence": confidence})
+
+                else:
+                    actions.append({"domain": domain, "action": "Unknown domain", "confidence": confidence})
+
+            except Exception as e:
+                actions.append({"domain": domain, "action": f"Error: {str(e)[:80]}", "confidence": confidence})
 
     return actions
 
