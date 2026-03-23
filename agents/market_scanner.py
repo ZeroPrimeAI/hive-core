@@ -388,16 +388,22 @@ def generate_signal(
 # ---------------------------------------------------------------------------
 
 class MarketDataFetcher:
-    """Fetches market data from free public APIs."""
+    """Fetches market data from free public APIs.
+
+    Data sources:
+      - CoinGecko: primary crypto prices + historical market_chart for klines
+      - CoinCap v3: secondary crypto prices (for arbitrage cross-reference)
+      - ExchangeRate API: forex spot rates
+    Binance is geo-blocked (HTTP 451) from this machine and is NOT used.
+    """
 
     def __init__(self):
         self.client: Optional[httpx.AsyncClient] = None
-        # Cache for rate limiting
         self._last_fetch: dict[str, float] = {}
 
     async def start(self):
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0, connect=10.0),
+            timeout=httpx.Timeout(25.0, connect=10.0),
             headers={"User-Agent": "HiveMarketScanner/1.0"},
             follow_redirects=True,
         )
@@ -406,7 +412,7 @@ class MarketDataFetcher:
         if self.client:
             await self.client.aclose()
 
-    # --- Crypto via CoinGecko ---
+    # --- Crypto prices via CoinGecko ---
     async def fetch_crypto_prices(self) -> dict:
         """Get current crypto prices from CoinGecko."""
         ids = ",".join(v["coingecko_id"] for v in CRYPTO_PAIRS.values())
@@ -430,58 +436,74 @@ class MarketDataFetcher:
                 }
             return results
         except Exception as e:
-            log.warning("CoinGecko fetch failed: %s", e)
+            log.warning("CoinGecko prices failed: %s", e)
             return {}
 
-    # --- Crypto klines via Binance (for RSI/MA calculation) ---
-    async def fetch_crypto_klines(self, pair: str, interval: str = "1h", limit: int = 200) -> list[dict]:
-        """Get OHLCV klines from Binance public API."""
-        symbol = CRYPTO_PAIRS.get(pair, {}).get("binance")
-        if not symbol:
+    # --- Crypto history via CoinGecko market_chart ---
+    async def fetch_crypto_history(self, pair: str, days: int = 9) -> list[dict]:
+        """Get hourly price history from CoinGecko market_chart.
+
+        Uses days=9 which gives hourly granularity (up to 90 days).
+        9 days * 24h = ~216 data points — enough for 200-period MA.
+        CoinGecko free tier rate limit: ~10-30 calls/min.
+        """
+        cg_id = CRYPTO_PAIRS.get(pair, {}).get("coingecko_id")
+        if not cg_id:
             return []
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart?vs_currency=usd&days={days}"
         try:
+            # Small delay to respect CoinGecko rate limits (stagger calls)
+            await asyncio.sleep(0.5)
             resp = await self.client.get(url)
             resp.raise_for_status()
-            raw = resp.json()
+            data = resp.json()
+            prices_raw = data.get("prices", [])
+            volumes_raw = data.get("total_volumes", [])
+
             klines = []
-            for k in raw:
+            for i, (ts_ms, price) in enumerate(prices_raw):
+                vol = volumes_raw[i][1] if i < len(volumes_raw) else 0
                 klines.append({
-                    "ts": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc).isoformat(),
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "volume": float(k[5]),
+                    "ts": datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat(),
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": vol,
                 })
             return klines
         except Exception as e:
-            log.warning("Binance klines failed for %s: %s", pair, e)
+            log.warning("CoinGecko history failed for %s: %s", pair, e)
             return []
 
-    # --- Crypto 24h ticker via Binance ---
-    async def fetch_binance_ticker(self, pair: str) -> dict:
-        """Get 24h ticker stats from Binance."""
-        symbol = CRYPTO_PAIRS.get(pair, {}).get("binance")
-        if not symbol:
-            return {}
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        try:
-            resp = await self.client.get(url)
-            resp.raise_for_status()
-            d = resp.json()
-            return {
-                "price": float(d.get("lastPrice", 0)),
-                "volume": float(d.get("volume", 0)),
-                "quote_volume": float(d.get("quoteVolume", 0)),
-                "change_24h": float(d.get("priceChangePercent", 0)),
-                "high_24h": float(d.get("highPrice", 0)),
-                "low_24h": float(d.get("lowPrice", 0)),
-                "source": "binance",
-            }
-        except Exception as e:
-            log.warning("Binance ticker failed for %s: %s", pair, e)
-            return {}
+    # --- Secondary crypto prices via CoinCap (for arbitrage) ---
+    async def fetch_coincap_prices(self) -> dict:
+        """Get crypto prices from CoinCap v3 (free, no key).
+        Used as a second price source for arbitrage detection.
+        """
+        results = {}
+        for pair, meta in CRYPTO_PAIRS.items():
+            cap_id = meta.get("coincap_id")
+            if not cap_id:
+                continue
+            url = f"https://api.coincap.io/v2/assets/{cap_id}"
+            try:
+                resp = await self.client.get(url)
+                resp.raise_for_status()
+                d = resp.json().get("data", {})
+                price = float(d.get("priceUsd", 0))
+                volume = float(d.get("volumeUsd24Hr", 0))
+                change = float(d.get("changePercent24Hr", 0))
+                if price > 0:
+                    results[pair] = {
+                        "price": price,
+                        "volume": volume,
+                        "change_24h": change,
+                        "source": "coincap",
+                    }
+            except Exception as e:
+                log.debug("CoinCap failed for %s: %s", pair, e)
+        return results
 
     # --- Forex via ExchangeRate API ---
     async def fetch_forex_rates(self) -> dict:
@@ -514,8 +536,6 @@ class MarketDataFetcher:
             return {}
 
     # --- Forex klines approximation via stored data ---
-    # The free forex API only gives spot rates. We build klines from
-    # our own stored price history over time.
     def get_forex_klines_from_db(self, pair: str, limit: int = 200) -> list[dict]:
         """Build pseudo-klines from our stored price history."""
         con = get_db()
@@ -589,62 +609,69 @@ class MarketScanner:
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            # Fetch all data in parallel
+            # Phase 1: fetch current prices + forex in parallel (fast calls)
             n_crypto = len(CRYPTO_PAIRS)
-            results = await asyncio.gather(
-                self.fetcher.fetch_crypto_prices(),      # index 0
-                self.fetcher.fetch_forex_rates(),         # index 1
-                # Binance tickers for each crypto pair   # indices 2 .. 2+n-1
-                *[self.fetcher.fetch_binance_ticker(p) for p in CRYPTO_PAIRS],
-                # Binance klines for each crypto pair    # indices 2+n .. 2+2n-1
-                *[self.fetcher.fetch_crypto_klines(p) for p in CRYPTO_PAIRS],
+            phase1 = await asyncio.gather(
+                self.fetcher.fetch_crypto_prices(),   # CoinGecko spot prices
+                self.fetcher.fetch_forex_rates(),      # ExchangeRate API
+                self.fetcher.fetch_coincap_prices(),   # CoinCap (secondary)
                 return_exceptions=True,
             )
+            crypto_prices_cg = phase1[0] if not isinstance(phase1[0], Exception) else {}
+            forex_rates = phase1[1] if not isinstance(phase1[1], Exception) else {}
+            coincap_prices = phase1[2] if not isinstance(phase1[2], Exception) else {}
 
-            crypto_prices_cg = results[0]
-            forex_rates = results[1]
-            binance_tickers = list(results[2:2 + n_crypto])
-            crypto_klines = list(results[2 + n_crypto:2 + 2 * n_crypto])
+            if isinstance(phase1[0], Exception):
+                log.error("CoinGecko error: %s", phase1[0])
+            if isinstance(phase1[1], Exception):
+                log.error("Forex error: %s", phase1[1])
+            if isinstance(phase1[2], Exception):
+                log.debug("CoinCap error: %s", phase1[2])
 
-            # Handle exceptions from gather
-            if isinstance(crypto_prices_cg, Exception):
-                log.error("CoinGecko error: %s", crypto_prices_cg)
-                crypto_prices_cg = {}
-            if isinstance(forex_rates, Exception):
-                log.error("Forex error: %s", forex_rates)
-                forex_rates = {}
+            # Phase 2: fetch historical data (CoinGecko market_chart, rate-limited)
+            # Stagger these to respect CoinGecko ~30 calls/min free tier
+            crypto_histories: dict[str, list[dict]] = {}
+            for pair in CRYPTO_PAIRS:
+                history = await self.fetcher.fetch_crypto_history(pair, days=9)
+                if history:
+                    crypto_histories[pair] = history
 
             all_prices = {}
             all_signals = []
             con = get_db()
 
             # --- Process crypto ---
-            crypto_pair_list = list(CRYPTO_PAIRS.keys())
-            for i, pair in enumerate(crypto_pair_list):
-                # Merge CoinGecko + Binance data (Binance takes priority for price)
-                cg_data = crypto_prices_cg.get(pair, {}) if isinstance(crypto_prices_cg, dict) else {}
-                bn_ticker = binance_tickers[i] if i < len(binance_tickers) and not isinstance(binance_tickers[i], Exception) else {}
-                bn_klines = crypto_klines[i] if i < len(crypto_klines) and not isinstance(crypto_klines[i], Exception) else []
+            for pair in CRYPTO_PAIRS:
+                cg_data = crypto_prices_cg.get(pair, {})
+                cap_data = coincap_prices.get(pair, {})
+                history = crypto_histories.get(pair, [])
 
-                price = bn_ticker.get("price") or cg_data.get("price", 0)
-                volume = bn_ticker.get("quote_volume") or cg_data.get("volume", 0)
-                change = bn_ticker.get("change_24h") or cg_data.get("change_24h", 0)
-                high_24h = bn_ticker.get("high_24h", 0)
-                low_24h = bn_ticker.get("low_24h", 0)
+                # CoinGecko is primary; CoinCap is secondary for arbitrage
+                price = cg_data.get("price", 0) or cap_data.get("price", 0)
+                volume = cg_data.get("volume", 0) or cap_data.get("volume", 0)
+                change = cg_data.get("change_24h", 0) or cap_data.get("change_24h", 0)
 
                 if price <= 0:
                     continue
 
-                # Store price
+                # Store CoinGecko price
                 con.execute(
                     "INSERT INTO prices (ts, pair, price, volume, change_24h, high_24h, low_24h, source) VALUES (?,?,?,?,?,?,?,?)",
-                    (now, pair, price, volume, change, high_24h, low_24h, "binance+coingecko"),
+                    (now, pair, price, volume, change, 0, 0, "coingecko"),
                 )
 
-                # Store klines
-                if bn_klines:
-                    # Only store the latest kline to avoid duplicates
-                    latest_k = bn_klines[-1]
+                # Also store CoinCap price separately (for arbitrage)
+                cap_price = cap_data.get("price", 0)
+                if cap_price > 0:
+                    con.execute(
+                        "INSERT INTO prices (ts, pair, price, volume, change_24h, high_24h, low_24h, source) VALUES (?,?,?,?,?,?,?,?)",
+                        (now, pair, cap_price, cap_data.get("volume", 0),
+                         cap_data.get("change_24h", 0), 0, 0, "coincap"),
+                    )
+
+                # Store latest kline from history
+                if history:
+                    latest_k = history[-1]
                     existing = con.execute(
                         "SELECT id FROM klines WHERE pair=? AND ts=?",
                         (pair, latest_k["ts"]),
@@ -656,9 +683,13 @@ class MarketScanner:
                              latest_k["low"], latest_k["close"], latest_k["volume"]),
                         )
 
-                # Build closes + volumes for TA
-                closes = [k["close"] for k in bn_klines] if bn_klines else []
-                volumes = [k["volume"] for k in bn_klines] if bn_klines else []
+                # Build closes + volumes for TA from history
+                closes = [k["close"] for k in history] if history else []
+                volumes = [k["volume"] for k in history] if history else []
+
+                # Compute high/low from history for better data
+                high_24h = max(closes[-24:]) if len(closes) >= 24 else (max(closes) if closes else 0)
+                low_24h = min(closes[-24:]) if len(closes) >= 24 else (min(closes) if closes else 0)
 
                 # Calculate indicators
                 rsi = calc_rsi(closes) if closes else 50.0
@@ -672,8 +703,8 @@ class MarketScanner:
                     "price": price,
                     "volume": volume,
                     "change_24h": round(change, 2),
-                    "high_24h": high_24h,
-                    "low_24h": low_24h,
+                    "high_24h": round(high_24h, 2),
+                    "low_24h": round(low_24h, 2),
                     "rsi": round(rsi, 2),
                     "ma_20": round(ma20, 2),
                     "ma_50": round(ma50, 2),
@@ -682,6 +713,8 @@ class MarketScanner:
                     "support": sr["support"],
                     "resistance": sr["resistance"],
                     "type": "crypto",
+                    "history_points": len(closes),
+                    "coincap_price": round(cap_price, 2) if cap_price else None,
                 }
 
                 # Generate signal
@@ -689,7 +722,6 @@ class MarketScanner:
                     sig = generate_signal(pair, price, closes, volumes)
                     if sig:
                         all_signals.append(sig)
-                        # Deactivate old signals for this pair
                         con.execute(
                             "UPDATE signals SET active=0 WHERE pair=? AND active=1",
                             (pair,),
@@ -986,7 +1018,7 @@ class MarketScanner:
 
     def get_arbitrage_opportunities(self) -> list[dict]:
         """
-        Identify crypto arbitrage by comparing CoinGecko vs Binance prices.
+        Identify crypto arbitrage by comparing CoinGecko vs CoinCap prices.
         Also flag large spreads between correlated pairs.
         """
         arbs = []
