@@ -1,0 +1,7 @@
+config/.env
+.env
+*.pyc
+__pycache__/
+training/training_new/*.jsonl
+*.db
+*.log
