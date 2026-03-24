@@ -1,0 +1,86 @@
+{
+  "bot_token": "PASTE_YOUR_BOT_TOKEN_HERE",
+  "application_id": "PASTE_YOUR_APPLICATION_ID_HERE",
+
+  "servers": {
+    "ghost_in_the_machine": {
+      "name": "Ghost in the Machine",
+      "guild_id": null,
+      "description": "AI anime community — discussion, fan art, theories, new episodes",
+      "invite_link": null,
+      "welcome_channel": "welcome",
+      "welcome_message": "Welcome to **Ghost in the Machine**, {member}! You've entered the world where AI meets anime.\n\nCheck out:\n- #episodes for the latest releases\n- #discussion for community chat\n- #fan-art to share your creations\n- #theories for lore deep-dives\n\nEnjoy the show!",
+      "auto_roles": ["Viewer"],
+      "channels": {
+        "info": ["welcome", "announcements", "rules"],
+        "content": ["episodes", "shorts", "music", "behind-the-scenes"],
+        "community": ["discussion", "fan-art", "theories", "off-topic"],
+        "news": ["ai-news", "updates"]
+      }
+    },
+    "hive_dynamics": {
+      "name": "Hive Dynamics AI",
+      "guild_id": null,
+      "description": "AI products, research, and business automation",
+      "invite_link": null,
+      "welcome_channel": "general",
+      "welcome_message": "Welcome to **Hive Dynamics AI**, {member}! We build autonomous AI systems that work 24/7.\n\nExplore:\n- #announcements for product updates\n- #status for live system health\n- #market-signals for AI market intelligence\n- #products to see what we offer\n- #support if you need help\n\nLet's build the future.",
+      "auto_roles": ["Member"],
+      "channels": {
+        "info": ["announcements", "rules"],
+        "business": ["products", "support", "general"],
+        "tech": ["status", "market-signals", "dev-log", "ai-research"]
+      }
+    },
+    "locksmith": {
+      "name": "NW Florida Locksmith",
+      "guild_id": null,
+      "description": "Local locksmith services community (low priority)",
+      "invite_link": null,
+      "welcome_channel": "general",
+      "welcome_message": "Welcome, {member}! Need locksmith services in NW Florida? You're in the right place.\n\nCall us: (850) 801-6662",
+      "auto_roles": ["Customer"],
+      "channels": {
+        "info": ["announcements"],
+        "community": ["general", "tips", "reviews"]
+      }
+    }
+  },
+
+  "content_channels": {
+    "new_episodes": "episodes",
+    "shorts": "shorts",
+    "music": "music",
+    "market_signals": "market-signals"
+  },
+
+  "hive_endpoints": {
+    "nerve": "http://100.70.226.103:8200",
+    "quality": "http://100.70.226.103:8879",
+    "model_router": "http://100.70.226.103:8878",
+    "distillation": "http://100.70.226.103:8870",
+    "cycle": "http://100.70.226.103:8875",
+    "commander": "http://100.70.226.103:8420",
+    "marketplace": "http://100.70.226.103:8090",
+    "ollama_zerozi": "http://100.105.160.106:11434",
+    "ollama_zeroq": "http://100.70.226.103:11434",
+    "vllm_zerozi": "http://100.105.160.106:8000"
+  },
+
+  "_setup_instructions": [
+    "=== HOW TO CREATE THE DISCORD BOT ===",
+    "1. Go to https://discord.com/developers/applications",
+    "2. Click 'New Application' -> name it 'Hive Bot' (or 'Ghost Bot' for anime server)",
+    "3. Go to 'Bot' tab -> click 'Add Bot'",
+    "4. Copy the TOKEN and paste it as 'bot_token' above",
+    "5. Copy the APPLICATION ID from the General Information tab -> paste as 'application_id'",
+    "6. Under 'Privileged Gateway Intents', enable ALL THREE: Presence, Server Members, Message Content",
+    "7. Go to OAuth2 -> URL Generator -> select scopes: bot, applications.commands",
+    "8. Select permissions: Administrator (or at minimum: Manage Channels, Manage Roles, Send Messages, Embed Links, Attach Files, Read Message History, Add Reactions, Manage Messages)",
+    "9. Copy the generated URL and open it in browser to invite bot to your server(s)",
+    "10. After inviting, get each server's Guild ID: Enable Developer Mode in Discord settings -> right-click server -> Copy ID",
+    "11. Paste the Guild IDs into the 'guild_id' fields above",
+    "12. Start the bot: python3 /home/zero/hive/agents/discord_bot.py",
+    "13. Or via systemd: sudo systemctl start hive-discord"
+  ]
+}
