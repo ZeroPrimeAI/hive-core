@@ -31,6 +31,15 @@ from contextlib import contextmanager
 from urllib.parse import quote_plus, urlencode
 
 import httpx
+
+# Reasoning Bank — cache analysis results
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+    from reasoning_client import ReasoningClient
+    _rc_intel = ReasoningClient(domain="competitive_intel")
+except ImportError:
+    _rc_intel = None
+
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -205,7 +214,13 @@ def init_db():
 # ==========================================================================
 
 async def analyze_with_ollama(prompt: str, timeout: float = 30.0) -> str:
-    """Send a prompt to local Ollama gemma2:2b for analysis."""
+    """Send a prompt to local Ollama gemma2:2b for analysis. Cache-first via reasoning bank."""
+    # Check reasoning bank cache first
+    if _rc_intel:
+        cached = _rc_intel.ask(prompt)
+        if cached["hit"]:
+            return cached["response"]
+    # Cache miss — call Ollama
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
@@ -218,14 +233,23 @@ async def analyze_with_ollama(prompt: str, timeout: float = 30.0) -> str:
                 }
             )
             if resp.status_code == 200:
-                return resp.json().get("response", "").strip()
+                result = resp.json().get("response", "").strip()
+                if result and _rc_intel:
+                    _rc_intel.learn(prompt, result, tokens=len(result) // 4)
+                return result
     except Exception as e:
         pass
     return ""
 
 
 def analyze_with_ollama_sync(prompt: str, timeout: float = 30.0) -> str:
-    """Synchronous version for background threads."""
+    """Synchronous version for background threads. Cache-first via reasoning bank."""
+    # Check reasoning bank cache first
+    if _rc_intel:
+        cached = _rc_intel.ask(prompt)
+        if cached["hit"]:
+            return cached["response"]
+    # Cache miss — call Ollama
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
@@ -238,7 +262,10 @@ def analyze_with_ollama_sync(prompt: str, timeout: float = 30.0) -> str:
                 }
             )
             if resp.status_code == 200:
-                return resp.json().get("response", "").strip()
+                result = resp.json().get("response", "").strip()
+                if result and _rc_intel:
+                    _rc_intel.learn(prompt, result, tokens=len(result) // 4)
+                return result
     except Exception:
         pass
     return ""

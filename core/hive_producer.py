@@ -30,6 +30,16 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+# Reasoning Bank — cache-first inference
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from reasoning_client import ReasoningClient
+    _rc_content = ReasoningClient(domain="content")
+    _rc_shorts = ReasoningClient(domain="shorts")
+except ImportError:
+    _rc_content = None
+    _rc_shorts = None
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -812,7 +822,17 @@ Write 8-12 lines. Make it emotional, meaningful, and cinematic.
 Quality bar: EP12 "The Voice" - ethereal, wonder, digital ambiance.
 Do NOT include stage directions in parentheses. Just dialogue and narration."""
 
-    script = ollama_generate(prompt, max_tokens=800)
+    # Cache-first: check reasoning bank before hitting Ollama
+    script = None
+    if _rc_content:
+        cached = _rc_content.ask(prompt)
+        if cached["hit"]:
+            script = cached["response"]
+            log(f"Script CACHE HIT for ep{episode_num:02d} (saved {cached['tokens_saved']} tokens)")
+    if not script:
+        script = ollama_generate(prompt, max_tokens=800)
+        if script and _rc_content:
+            _rc_content.learn(prompt, script, tokens=len(script) // 4)
     if not script:
         return None
 
@@ -1073,7 +1093,17 @@ def produce_short(topic, index=0):
 Keep it punchy, engaging, under 80 words. Start with a hook.
 No character tags, just the narration text."""
 
-    narration = ollama_generate(prompt, max_tokens=200)
+    # Cache-first: check reasoning bank for similar short narrations
+    narration = None
+    if _rc_shorts:
+        cached = _rc_shorts.ask(prompt)
+        if cached["hit"]:
+            narration = cached["response"]
+            log(f"Short narration CACHE HIT (saved {cached['tokens_saved']} tokens)")
+    if not narration:
+        narration = ollama_generate(prompt, max_tokens=200)
+        if narration and _rc_shorts:
+            _rc_shorts.learn(prompt, narration, tokens=len(narration) // 4)
     if not narration:
         return None
 

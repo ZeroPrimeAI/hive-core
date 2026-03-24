@@ -36,6 +36,18 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import httpx
+
+# Reasoning Bank — cache queen consultations
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from reasoning_client import ReasoningClient
+    _rc_queen = ReasoningClient(domain="queen_consultation")
+    _rc_synthesis = ReasoningClient(domain="cloud_synthesis")
+except ImportError:
+    _rc_queen = None
+    _rc_synthesis = None
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -600,12 +612,23 @@ async def alnilam_decide(state: dict, focus: str = "auto") -> list:
                 f"Personality: {queen['personality']}. "
                 f"Be concise (2-3 sentences). End with a clear RECOMMENDATION and CONFIDENCE (0-100%)."
             )
-            response = await infer(
-                f"{situation}\n\nQUESTION: {q['question']}",
-                system_prompt,
-                queen["model"],
-                300
-            )
+            # Cache-first: check reasoning bank for similar queen consultations
+            full_prompt = f"{situation}\n\nQUESTION: {q['question']}"
+            cache_key = f"[{qid}] {q['question']}"
+            response = None
+            if _rc_queen:
+                cached = _rc_queen.ask(cache_key)
+                if cached["hit"]:
+                    response = cached["response"]
+            if not response:
+                response = await infer(
+                    full_prompt,
+                    system_prompt,
+                    queen["model"],
+                    300
+                )
+                if response and _rc_queen and "[All inference endpoints failed]" not in response:
+                    _rc_queen.learn(cache_key, response, tokens=len(response) // 4)
             conf = 50.0
             conf_match = re.search(r'(\d+)\s*%', response)
             if conf_match:
@@ -642,7 +665,17 @@ async def alnilam_decide(state: dict, focus: str = "auto") -> list:
                 f"4. ACTION: Specific next step to execute\n"
                 f"Be concise and decisive."
             )
-            consensus_text = await infer_cloud_brain(synthesis_prompt, "reasoning", 600)
+            # Cache-first: check reasoning bank for similar synthesis
+            consensus_text = None
+            synthesis_cache_key = f"[synthesis] {q['question']}"
+            if _rc_synthesis:
+                cached = _rc_synthesis.ask(synthesis_cache_key)
+                if cached["hit"]:
+                    consensus_text = cached["response"]
+            if not consensus_text:
+                consensus_text = await infer_cloud_brain(synthesis_prompt, "reasoning", 600)
+                if consensus_text and _rc_synthesis:
+                    _rc_synthesis.learn(synthesis_cache_key, consensus_text, tokens=len(consensus_text) // 4, model="qwen3:14b")
 
             decision = {
                 "domain": q["domain"],
