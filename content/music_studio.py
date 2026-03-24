@@ -150,7 +150,7 @@ GENRE_PROGRESSIONS = {
         "hype":       [("D", "min"), ("Bb", "maj"), ("C", "maj"), ("D", "min")],
     },
     "country": {
-        "heartfelt":  [("G", "maj"), ("Em", "min"), ("C", "maj"), ("D", "maj")],
+        "heartfelt":  [("G", "maj"), ("E", "min"), ("C", "maj"), ("D", "maj")],
         "upbeat":     [("C", "maj"), ("F", "maj"), ("G", "maj"), ("C", "maj")],
         "nostalgic":  [("D", "maj"), ("A", "maj"), ("G", "maj"), ("D", "maj")],
         "road_trip":  [("A", "maj"), ("D", "maj"), ("E", "maj"), ("A", "maj")],
